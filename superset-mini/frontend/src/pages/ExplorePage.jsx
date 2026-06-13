@@ -1,0 +1,239 @@
+import { useEffect, useState } from "react";
+import { api } from "../api.js";
+import ChartView from "../components/ChartView.jsx";
+
+const VIZ_TYPES = ["table", "bar", "line", "area", "pie", "scatter", "big_number"];
+const AGGS = ["SUM", "AVG", "MIN", "MAX", "COUNT", "COUNT_DISTINCT"];
+const OPS = ["=", "!=", ">", ">=", "<", "<=", "IN", "NOT IN", "LIKE", "IS NULL", "IS NOT NULL"];
+
+export default function ExplorePage({ ttcMode }) {
+  const [datasets, setDatasets] = useState([]);
+  const [datasetId, setDatasetId] = useState("");
+  const [dataset, setDataset] = useState(null);
+
+  const [vizType, setVizType] = useState("bar");
+  const [dimensions, setDimensions] = useState([]);
+  const [metrics, setMetrics] = useState([{ column: "", aggregate: "SUM", label: "" }]);
+  const [filters, setFilters] = useState([]);
+  const [rowLimit, setRowLimit] = useState(1000);
+
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState("");
+  const [chartName, setChartName] = useState("");
+  const [msg, setMsg] = useState("");
+
+  // text-to-chart
+  const [prompt, setPrompt] = useState("");
+  const [ttcSource, setTtcSource] = useState("");
+  const [ttcExplanation, setTtcExplanation] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => { api.listDatasets().then(setDatasets); }, []);
+
+  useEffect(() => {
+    if (!datasetId) { setDataset(null); return; }
+    api.getDataset(datasetId).then(setDataset);
+  }, [datasetId]);
+
+  function buildSpec() {
+    return {
+      dimensions,
+      metrics: metrics
+        .filter((m) => m.aggregate)
+        .map((m) => ({
+          column: m.column || null,
+          aggregate: m.aggregate,
+          label: m.label || undefined,
+        })),
+      filters: filters
+        .filter((f) => f.column)
+        .map((f) => ({ column: f.column, op: f.op, value: parseValue(f.value) })),
+      order_by: [],
+      row_limit: Number(rowLimit) || 1000,
+    };
+  }
+
+  async function runPreview() {
+    setError(""); setMsg("");
+    if (!datasetId) { setError("Select a dataset."); return; }
+    try {
+      const r = await api.explore({
+        name: "preview", dataset_id: Number(datasetId), viz_type: vizType, params: buildSpec(),
+      });
+      setResult(r);
+    } catch (e) { setError(e.message); setResult(null); }
+  }
+
+  async function save() {
+    setError(""); setMsg("");
+    if (!chartName) { setError("Give the chart a name."); return; }
+    try {
+      const c = await api.createChart({
+        name: chartName, dataset_id: Number(datasetId), viz_type: vizType, params: buildSpec(),
+      });
+      setMsg(`Saved chart "${c.name}" (#${c.id}).`);
+    } catch (e) { setError(e.message); }
+  }
+
+  async function generate() {
+    setError(""); setMsg(""); setTtcSource(""); setBusy(true);
+    if (!datasetId) { setError("Select a dataset first."); setBusy(false); return; }
+    try {
+      const r = await api.nlChart({ dataset_id: Number(datasetId), prompt });
+      // Apply the generated spec into the builder so it stays editable.
+      setVizType(r.viz_type);
+      setDimensions(r.params.dimensions || []);
+      setMetrics(
+        (r.params.metrics || []).map((m) => ({
+          column: m.column || "", aggregate: m.aggregate, label: m.label || "",
+        }))
+      );
+      setFilters(
+        (r.params.filters || []).map((f) => ({ column: f.column, op: f.op, value: f.value ?? "" }))
+      );
+      setRowLimit(r.params.row_limit || 1000);
+      setResult(r.result);
+      setTtcSource(r.source);
+      setTtcExplanation(r.explanation);
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  }
+
+  const columns = dataset ? dataset.columns : [];
+
+  return (
+    <div>
+      <h2>{ttcMode ? "Text → Chart" : "Explore (Chart Builder)"}</h2>
+
+      <div className="row">
+        <select value={datasetId} onChange={(e) => setDatasetId(e.target.value)}>
+          <option value="">Select dataset…</option>
+          {datasets.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+        </select>
+        {dataset && <span className="muted small">{columns.length} columns</span>}
+      </div>
+
+      {/* Text-to-chart panel */}
+      <div className="panel ttc">
+        <h4>🪄 Describe the chart you want</h4>
+        <div className="row">
+          <input style={{ flex: 3 }} value={prompt} onChange={(e) => setPrompt(e.target.value)}
+                 placeholder='e.g. "total sales by region" or "average profit per category as a pie chart"' />
+          <button onClick={generate} disabled={busy || !datasetId}>
+            {busy ? "Generating…" : "Generate"}
+          </button>
+        </div>
+        {ttcSource && (
+          <p className={ttcSource === "claude" ? "success" : "warn"}>
+            Source: <b>{ttcSource}</b>
+            {ttcSource === "heuristic_fallback" &&
+              " — ANTHROPIC_API_KEY not set, used local keyword parser."}
+            {ttcExplanation && <> · {ttcExplanation}</>}
+          </p>
+        )}
+      </div>
+
+      <div className="grid-2">
+        <div className="panel">
+          <h4>Query</h4>
+          <label>Visualization</label>
+          <select value={vizType} onChange={(e) => setVizType(e.target.value)}>
+            {VIZ_TYPES.map((v) => <option key={v} value={v}>{v}</option>)}
+          </select>
+
+          <label>Dimensions (group by)</label>
+          <select multiple value={dimensions} size={Math.min(5, Math.max(2, columns.length))}
+                  onChange={(e) =>
+                    setDimensions(Array.from(e.target.selectedOptions, (o) => o.value))}>
+            {columns.map((c) => <option key={c.name} value={c.name}>{c.name} ({c.type})</option>)}
+          </select>
+
+          <label>Metrics</label>
+          {metrics.map((m, i) => (
+            <div className="row" key={i}>
+              <select value={m.aggregate}
+                      onChange={(e) => updateMetric(metrics, setMetrics, i, "aggregate", e.target.value)}>
+                {AGGS.map((a) => <option key={a}>{a}</option>)}
+              </select>
+              <select value={m.column}
+                      onChange={(e) => updateMetric(metrics, setMetrics, i, "column", e.target.value)}>
+                <option value="">(none / *)</option>
+                {columns.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
+              </select>
+              <input placeholder="label" value={m.label}
+                     onChange={(e) => updateMetric(metrics, setMetrics, i, "label", e.target.value)} />
+              <button className="danger" onClick={() => setMetrics(metrics.filter((_, j) => j !== i))}>×</button>
+            </div>
+          ))}
+          <button onClick={() => setMetrics([...metrics, { column: "", aggregate: "SUM", label: "" }])}>
+            + metric
+          </button>
+
+          <label>Filters</label>
+          {filters.map((f, i) => (
+            <div className="row" key={i}>
+              <select value={f.column}
+                      onChange={(e) => updateMetric(filters, setFilters, i, "column", e.target.value)}>
+                <option value="">column…</option>
+                {columns.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
+              </select>
+              <select value={f.op}
+                      onChange={(e) => updateMetric(filters, setFilters, i, "op", e.target.value)}>
+                {OPS.map((o) => <option key={o}>{o}</option>)}
+              </select>
+              <input placeholder="value" value={f.value}
+                     onChange={(e) => updateMetric(filters, setFilters, i, "value", e.target.value)} />
+              <button className="danger" onClick={() => setFilters(filters.filter((_, j) => j !== i))}>×</button>
+            </div>
+          ))}
+          <button onClick={() => setFilters([...filters, { column: "", op: "=", value: "" }])}>
+            + filter
+          </button>
+
+          <label>Row limit</label>
+          <input type="number" value={rowLimit} onChange={(e) => setRowLimit(e.target.value)} />
+
+          <div className="row" style={{ marginTop: 12 }}>
+            <button onClick={runPreview} disabled={!datasetId}>Run</button>
+            <input placeholder="Chart name" value={chartName}
+                   onChange={(e) => setChartName(e.target.value)} />
+            <button onClick={save} disabled={!datasetId}>Save chart</button>
+          </div>
+        </div>
+
+        <div className="panel">
+          <h4>Preview</h4>
+          {error && <p className="error">{error}</p>}
+          {msg && <p className="success">{msg}</p>}
+          {result ? (
+            <>
+              <ChartView vizType={vizType} result={result} />
+              <details>
+                <summary className="muted small">SQL ({result.row_count} rows)</summary>
+                <pre className="mono small">{result.sql}</pre>
+              </details>
+            </>
+          ) : <p className="muted">Run a query to preview.</p>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function updateMetric(list, setList, i, key, value) {
+  const next = list.slice();
+  next[i] = { ...next[i], [key]: value };
+  setList(next);
+}
+
+function parseValue(v) {
+  if (v === "" || v === null || v === undefined) return null;
+  if (typeof v === "string" && v.includes(",")) return v.split(",").map((s) => coerce(s.trim()));
+  return coerce(v);
+}
+
+function coerce(v) {
+  if (typeof v !== "string") return v;
+  const n = Number(v);
+  return v.trim() !== "" && !Number.isNaN(n) ? n : v;
+}
