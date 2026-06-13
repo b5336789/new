@@ -3,8 +3,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
-from .config import ANTHROPIC_API_KEY
+from .config import ANTHROPIC_API_KEY, BASE_DIR
 from .database import init_db
 from .routers import charts, dashboards, databases, datasets, nl, sql, uploads
 from .seed import seed_examples
@@ -34,6 +35,13 @@ app.include_router(charts.router)
 app.include_router(dashboards.router)
 app.include_router(uploads.router)
 app.include_router(nl.router)
+
+
+# Serve the technical-documentation site at /docs-site when present.
+_DOCS_DIR = BASE_DIR.parent / "docs"
+if (_DOCS_DIR / "site" / "index.html").exists():
+    app.mount("/docs-site", StaticFiles(directory=_DOCS_DIR / "site", html=True),
+              name="docs-site")
 
 
 @app.get("/api/health")

@@ -20,8 +20,26 @@ with a **SQLAlchemy** metadata store, and a **React (Vite)** single-page fronten
 | **SQL Lab** | Run ad-hoc read-only `SELECT`/`WITH` queries and view results. |
 | **Explore (chart builder)** | Pick dimensions, metrics (SUM/AVG/COUNT/…), filters, and a viz type; live preview. |
 | **Visualizations** | table, bar, line, area, pie, scatter, big number (Recharts). |
+| **Charts** | Manage saved charts: thumbnails, edit in Explore, CSV download, delete. |
 | **Dashboards** | Compose saved charts onto a grid and view them together. |
+| **Time grain** | Superset-style temporal bucketing (day/week/month/quarter/year). |
+| **CSV export** | Download any chart or ad-hoc exploration as CSV. |
 | **Text → Chart** | Describe a chart in plain language; Claude produces the query spec, which is executed against your data. |
+
+## Documentation
+
+Full technical docs live in [`docs/`](./docs):
+[Architecture](./docs/ARCHITECTURE.md) ·
+[Data Model](./docs/DATA_MODEL.md) ·
+[Query Engine](./docs/QUERY_ENGINE.md) ·
+[Text → Chart](./docs/TEXT_TO_CHART.md) ·
+[API Reference](./docs/API.md) ·
+[Superset Comparison](./docs/SUPERSET_COMPARISON.md) ·
+[Development](./docs/DEVELOPMENT.md)
+
+A browsable **documentation website** is at [`docs/site/index.html`](./docs/site/index.html)
+— open it directly in a browser, or visit `http://localhost:8000/docs-site/` while the
+backend is running.
 
 ## Architecture
 

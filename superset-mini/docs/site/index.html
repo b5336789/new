@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Superset-mini · 技術文件</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<aside class="sidebar">
+  <div class="brand">Superset-mini<span>技術文件 · Technical Docs</span></div>
+  <nav>
+    <a href="#overview">總覽 Overview</a>
+    <a href="#features">功能 Features</a>
+    <a href="#architecture">架構 Architecture</a>
+    <a href="#datamodel">資料模型 Data Model</a>
+    <a href="#query">查詢引擎 Query Engine</a>
+    <a href="#ttc">Text → Chart</a>
+    <a href="#api">API 參考</a>
+    <a href="#methodology">做法 Methodology</a>
+    <a href="#comparison">與 Superset 比較</a>
+    <a href="#run">如何執行 Run</a>
+  </nav>
+  <div class="foot">
+    <a href="../ARCHITECTURE.md">Markdown docs →</a>
+    <span>opens raw .md files</span>
+  </div>
+</aside>
+
+<main>
+<section id="overview">
+  <h1>Superset-mini</h1>
+  <p class="lede">
+    一個從零打造、擬真 <b>Apache Superset</b> 核心工作流程的 BI 應用：<b>Python (FastAPI)</b>
+    後端 + <b>React (Vite)</b> 前端，並在其上加入 <b>Text → Chart</b>（自然語言生成圖表）功能。
+  </p>
+  <div class="callout">
+    <b>範圍誠實聲明 (Scope).</b> 這不是 Apache Superset 的完整重製（其原始碼達數十萬行）。
+    它實作了完整的端到端核心迴圈 —— <i>連線 → 資料集 → 查詢 → 圖表 → 儀表板</i> ——
+    作為扎實、有測試覆蓋的基礎，並額外加上 text-to-chart。
+  </div>
+  <div class="stat-row">
+    <div class="stat"><b>7</b><span>後端模組 routers</span></div>
+    <div class="stat"><b>7</b><span>視覺化類型</span></div>
+    <div class="stat"><b>13</b><span>通過的端到端測試</span></div>
+    <div class="stat"><b>2</b><span>text-to-chart 路徑</span></div>
+  </div>
+</section>
+
+<section id="features">
+  <h2>功能 Features</h2>
+  <table>
+    <thead><tr><th>區域</th><th>說明</th></tr></thead>
+    <tbody>
+      <tr><td>Databases</td><td>以 SQLAlchemy URI 連接任何資料來源（SQLite/Postgres…），含連線測試。</td></tr>
+      <tr><td>Datasets</td><td>註冊實體表或虛擬 (SQL 定義) 來源；快取欄位 metadata。</td></tr>
+      <tr><td>Excel / CSV 上傳</td><td>上傳檔案 → 載入 SQLite → 自動清洗欄名並註冊為資料集。</td></tr>
+      <tr><td>SQL Lab</td><td>執行唯讀 <code>SELECT</code>/<code>WITH</code> 查詢並檢視結果。</td></tr>
+      <tr><td>Explore 圖表建構器</td><td>選維度、指標 (SUM/AVG/COUNT…)、篩選、時間粒度；即時預覽。</td></tr>
+      <tr><td>視覺化</td><td>table、bar、line、area、pie、scatter、big number（Recharts）。</td></tr>
+      <tr><td>Charts / Dashboards</td><td>管理已存圖表（縮圖、編輯、CSV）、組合成儀表板。</td></tr>
+      <tr><td class="hl">Text → Chart</td><td class="hl">用自然語言描述圖表，Claude 產生 query spec 後對真實資料執行。</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section id="architecture">
+  <h2>架構 Architecture</h2>
+  <p>後端擁有資料來源連線、查詢引擎與 metadata store；前端是 JSON API 之上的輕量客戶端。
+     刻意分離 <b>metadata store</b>（應用自身的物件）與 <b>使用者資料來源</b>（被分析的資料），
+     這正是 Apache Superset 的做法。</p>
+  <pre class="diagram">
+┌─ Frontend (React + Vite) ─┐        ┌─ Backend (FastAPI) ───────────────┐
+│ pages/  Databases          │  HTTP  │ routers/  /api/databases           │
+│         Datasets + Upload  │ JSON   │           /api/datasets /api/sql   │
+│         SQL Lab            │ ─────► │           /api/charts /api/dashboards
+│         Explore (builder)  │        │           /api/upload  /api/nl     │
+│         Text → Chart       │        │                                    │
+│         Charts / Dashboards│        │ query_builder  QuerySpec → SQL     │
+│ components/ ChartView      │        │ engine         connect/introspect  │
+│   (Recharts)               │        │ services/text_to_chart  (Claude)   │
+└────────────────────────────┘        └───────────────┬────────────────────┘
+                                                       │ SQLAlchemy
+                       ┌────────────────────────────────┼──────────────────┐
+                       ▼                                ▼                  ▼
+                 metadata.db                      examples.db          uploads.db
+            (databases, datasets,              (seeded sample        (Excel/CSV
+             charts, dashboards)                sales data)          imports)</pre>
+  <h3>分層 Layers</h3>
+  <ol>
+    <li><b>Routers</b> — HTTP 介面，Pydantic 驗證、錯誤對映到狀態碼，僅做協調。</li>
+    <li><b>Query builder</b> — 純函式，把 <code>QuerySpec</code> 轉成安全的參數化 SQL，無 I/O。</li>
+    <li><b>Engine</b> — 唯一與使用者資料來源溝通之處：連線池、schema 探查、執行 SQL。</li>
+    <li><b>Metadata store</b> — SQLAlchemy ORM，持久化於 <code>metadata.db</code>。</li>
+    <li><b>Text-to-chart service</b> — NL → <code>QuerySpec</code>（Claude），含確定性後備。</li>
+  </ol>
+</section>
+
+<section id="datamodel">
+  <h2>資料模型 Data Model</h2>
+  <pre class="diagram">Database 1──* Dataset 1──* Chart *──1 Dashboard (由 layout 參照)</pre>
+  <table>
+    <thead><tr><th>實體</th><th>關鍵欄位</th><th>說明</th></tr></thead>
+    <tbody>
+      <tr><td>Database</td><td>name, sqlalchemy_uri</td><td>對實體資料來源的連線；刪除會連帶刪除其 Dataset。</td></tr>
+      <tr><td>Dataset</td><td>table_name | sql, columns(JSON)</td><td>實體表或虛擬 SQL；<code>table_name</code> 與 <code>sql</code> 二擇一。</td></tr>
+      <tr><td>Chart</td><td>viz_type, params(QuerySpec)</td><td>資料集 + 視覺化類型 + 查詢規格。</td></tr>
+      <tr><td>Dashboard</td><td>layout(JSON)</td><td><code>[{chart_id,x,y,w,h}]</code>；建立時驗證 chart 是否存在。</td></tr>
+    </tbody>
+  </table>
+  <h3>QuerySpec（內嵌於 Chart.params）</h3>
+  <p>前端、查詢引擎、text-to-chart 三者之間的契約。</p>
+  <pre class="code">{
+  "dimensions": ["region"],
+  "metrics": [{"column": "sales", "aggregate": "SUM", "label": "total_sales"}],
+  "filters": [{"column": "year", "op": "=", "value": 2023}],
+  "order_by": [{"field": "total_sales", "desc": true}],
+  "row_limit": 1000,
+  "time_grain": "month",        // 選用：時間粒度
+  "time_column": "order_date"   // 設了 time_grain 時必填
+}</pre>
+</section>
+
+<section id="query">
+  <h2>查詢引擎 Query Engine</h2>
+  <p>引擎拆成<b>純建構器</b>（<code>query_builder.py</code>，無 I/O）與<b>執行器</b>
+     （<code>engine.py</code>，所有 I/O），讓建構器可被單元測試。</p>
+  <h3>安全模型 Safety</h3>
+  <p>兩道信任邊界：</p>
+  <ul>
+    <li><b>識別字（欄/表名）</b>：放進 SQL 前，先<b>對資料集已知欄位清單驗證</b>，再雙引號包裹。
+        未知欄位 → <code>QueryBuildError</code> → HTTP 400。這是抵禦欄名注入的主要防線。</li>
+    <li><b>字面值（filter value）</b>：<b>絕不</b>內插進 SQL 字串，一律以綁定參數
+        （<code>:f0</code>…）傳給 driver。</li>
+  </ul>
+  <h3>時間粒度 Time Grain（Superset 招牌功能）</h3>
+  <p>建構器具方言感知：SQLite 用 <code>strftime</code>，PostgreSQL 用原生
+     <code>date_trunc</code>。</p>
+  <pre class="code">-- 每月銷售額 (SQLite)
+SELECT strftime('%Y-%m', "order_date") AS "order_date",
+       SUM("sales") AS "monthly_sales"
+FROM "sales"
+GROUP BY strftime('%Y-%m', "order_date")
+LIMIT 1000</pre>
+  <p class="note">註：試算表載入的日期常是 ISO 字串（<code>2023-01-15</code>），SQLite 的
+     <code>strftime</code> 可直接運算，故上傳資料也能用時間粒度。</p>
+  <h3>SQL Lab 防護</h3>
+  <p><code>/api/sql/run</code> 僅允許 <code>SELECT</code>/<code>WITH</code> 開頭的語句，
+     並包成 <code>SELECT * FROM (&lt;user sql&gt;) LIMIT n</code>；異動語句（DELETE/UPDATE/DROP）回 400。</p>
+</section>
+
+<section id="ttc">
+  <h2>Text → Chart</h2>
+  <p>把「自然語言 + 資料集 schema」轉成可執行的 <code>QuerySpec</code> + 視覺化類型，
+     端點 <code>POST /api/nl/chart</code>。</p>
+  <pre class="diagram">prompt + dataset.columns
+        ▼  generate_chart_spec()        ANTHROPIC_API_KEY?
+        ├── 有 ─► Claude API (tool use) ─► spec, source="claude"
+        └── 無 ─► 啟發式 parser         ─► spec, source="heuristic_fallback"
+        ▼  build_query()  驗證欄位、產生 SQL
+        ▼  engine.run_sql()  對真實資料執行
+        ▼  { viz_type, params, explanation, source, result }</pre>
+  <p>產生的 spec <b>一律先對真實資料驗證並執行</b>才回傳。若模型杜撰欄位，
+     <code>build_query</code> 會拋錯，端點回 HTTP 422 —— 絕不靜默回傳跑不動的圖表。</p>
+  <h3>Claude 路徑（主要）</h3>
+  <p>用 Anthropic Messages API 的 <b>tool use</b> 強制結構化輸出：單一工具
+     <code>create_chart</code>，其 <code>input_schema</code> 對映 <code>QuerySpec</code>，
+     並以 <code>tool_choice</code> 強制呼叫。Schema 已放進 prompt、事後再驗證，
+     故幻覺欄位會被攔下。</p>
+  <pre class="code">export ANTHROPIC_API_KEY=sk-ant-...
+export ANTHROPIC_MODEL=claude-opus-4-8   # 選用</pre>
+  <h3>啟發式後備（無 key）</h3>
+  <p>確定性關鍵字 parser，讓功能在無 key 時仍可展示。<b>它把每個回應標記為
+     <code>source: "heuristic_fallback"</code></b>，絕不假裝是 LLM（fail-loud 原則）。
+     會推斷聚合（total→SUM、average→AVG…）、指標欄、時間意圖（over time→line + 粒度）、
+     維度與視覺化類型。</p>
+  <div class="callout warn">
+    本展示環境<b>未設定</b> <code>ANTHROPIC_API_KEY</code>，故預設走 heuristic fallback；
+    <code>/api/health</code> 與 UI 會明確標示目前採用哪條路徑。
+  </div>
+</section>
+
+<section id="api">
+  <h2>API 參考</h2>
+  <p>完整互動式文件（Swagger）在後端的 <code>/docs</code>。以下為摘要：</p>
+  <table>
+    <thead><tr><th>方法</th><th>路徑</th><th>用途</th></tr></thead>
+    <tbody>
+      <tr><td>GET</td><td>/api/health</td><td>狀態 + text_to_chart 路徑</td></tr>
+      <tr><td>GET/POST/DELETE</td><td>/api/databases…</td><td>連線 CRUD + 列出資料表</td></tr>
+      <tr><td>GET/POST/DELETE</td><td>/api/datasets…</td><td>資料集 CRUD + 刷新欄位</td></tr>
+      <tr><td>POST</td><td>/api/upload</td><td>Excel/CSV 上傳 → 資料集</td></tr>
+      <tr><td>POST</td><td>/api/sql/run</td><td>SQL Lab 唯讀查詢</td></tr>
+      <tr><td>GET/POST/PUT/DELETE</td><td>/api/charts…</td><td>圖表 CRUD、/data、/data.csv、/explore、/explore.csv</td></tr>
+      <tr><td>GET/POST/PUT/DELETE</td><td>/api/dashboards…</td><td>儀表板 CRUD</td></tr>
+      <tr><td>POST</td><td>/api/nl/chart</td><td>Text → Chart</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section id="methodology">
+  <h2>做法 Methodology</h2>
+  <p>本專案在開發前先放置 <code>CLAUDE.md</code>（AI coding 規則），並全程遵循。重點做法：</p>
+  <h3>1. 先思考、先釐清範圍 (Rule 1)</h3>
+  <p>「完整版 Superset」範圍極大且語意模糊，因此<b>先以結構化問題釐清</b>技術棧
+     （Python+React 擬真）、功能範圍（連線/資料集、SQL、圖表、儀表板 + Excel 上傳）、
+     以及 text-to-chart 的 LLM 來源（Claude），再動工。</p>
+  <h3>2. 里程碑檢查點 (Rule 10)</h3>
+  <ol>
+    <li><b>Checkpoint 1 — 後端</b>：models / 查詢引擎 / 全部 routers / 種子資料 + 測試。</li>
+    <li><b>Checkpoint 2 — 前端</b>：Vite SPA、各頁面、Recharts 視覺化。</li>
+    <li><b>Checkpoint 3 — 進階功能</b>：時間粒度、CSV 匯出、Charts 管理與編輯。</li>
+    <li><b>Checkpoint 4 — 技術文件 + 文件網站</b>（本頁）。</li>
+  </ol>
+  <p>每個檢查點都<b>提交 (commit)</b> 並驗證後才前進。</p>
+  <h3>3. 目標導向與業務邏輯測試 (Rule 4, 9)</h3>
+  <p>13 個端到端測試驗證<b>真實結果</b>而非空覆蓋率：例如 <code>SUM(sales)</code> 分區後是 4 列且
+     正確排序、未知欄位被拒、SQL Lab 拒絕 <code>DELETE</code>、Excel 上傳後
+     <code>A = 10 + 30 = 40</code> 立即可查、時間粒度產出 ≤24 個 <code>YYYY-MM</code> 月份桶。</p>
+  <h3>4. Fail Loud (Rule 12)</h3>
+  <p>連線失敗、欄位非法、LLM 解析失敗都<b>明確回報</b>並對映到適當的 HTTP 狀態；
+     無 API key 時 text-to-chart 走後備但<b>清楚標記</b>，絕不掩蓋不確定性。</p>
+  <h3>5. 純函式 / I/O 分離 (可測試性)</h3>
+  <p>查詢建構器保持純函式（無 I/O），執行器是唯一 I/O 邊界，讓查詢邏輯易於單元測試、
+     易於替換資料庫方言。</p>
+</section>
+
+<section id="comparison">
+  <h2>與 Apache Superset 比較</h2>
+  <h3>對映 Concept mapping</h3>
+  <table>
+    <thead><tr><th>Apache Superset</th><th>Superset-mini</th></tr></thead>
+    <tbody>
+      <tr><td>Metadata DB</td><td>metadata.db（SQLite）</td></tr>
+      <tr><td>Database / Dataset（實體+虛擬）</td><td>Database / Dataset</td></tr>
+      <tr><td>SQL Lab</td><td>/api/sql + SQL Lab 頁</td></tr>
+      <tr><td>Explore / slice</td><td>Explore + QuerySpec / Chart</td></tr>
+      <tr><td>Dashboard</td><td>Dashboard（grid layout）</td></tr>
+      <tr><td>Time grain</td><td>time_grain / time_column</td></tr>
+      <tr><td>~50+ 視覺化外掛</td><td>7 種視覺化（Recharts）</td></tr>
+      <tr><td class="hl">（無對應）</td><td class="hl">Text → Chart</td></tr>
+    </tbody>
+  </table>
+  <h3>刻意簡化 / 省略</h3>
+  <p>身分驗證與 RBAC、非同步查詢（Celery）、快取層（Redis）、儀表板原生篩選與交叉篩選、
+     拖拉式儀表板編輯器、SQL 的 Jinja 模板、完整視覺化外掛生態、警示與報表等，
+     皆屬範圍外 —— 每一項都是清楚的延伸點，而非隱藏的缺口。</p>
+</section>
+
+<section id="run">
+  <h2>如何執行 Run</h2>
+  <h3>後端</h3>
+  <pre class="code">cd backend
+python3 -m venv .venv &amp;&amp; source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn app.main:app --reload --port 8000   # /docs 有 Swagger</pre>
+  <h3>前端</h3>
+  <pre class="code">cd frontend
+npm install
+npm run dev      # http://localhost:5173 （/api 代理至 :8000）</pre>
+  <h3>測試</h3>
+  <pre class="code">cd backend &amp;&amp; source .venv/bin/activate
+python -m pytest -q     # 13 passed</pre>
+  <p class="note">首次啟動會植入 <b>Sample Sales</b> 資料集（2000 列），圖表立即可用。</p>
+</section>
+
+<footer>Superset-mini · 技術文件 · 由 FastAPI + React 打造，加上 Claude text-to-chart。</footer>
+</main>
+
+<script>
+// Highlight the current section in the sidebar as you scroll.
+const links = [...document.querySelectorAll('.sidebar nav a')];
+const map = new Map(links.map(a => [a.getAttribute('href').slice(1), a]));
+const obs = new IntersectionObserver((entries) => {
+  entries.forEach(e => {
+    if (e.isIntersecting) {
+      links.forEach(l => l.classList.remove('active'));
+      const a = map.get(e.target.id);
+      if (a) a.classList.add('active');
+    }
+  });
+}, { rootMargin: '-20% 0px -70% 0px' });
+document.querySelectorAll('main section').forEach(s => obs.observe(s));
+</script>
+</body>
+</html>
