@@ -68,6 +68,15 @@ _CHART_TOOL = {
                 },
             },
             "row_limit": {"type": "integer"},
+            "time_grain": {
+                "type": ["string", "null"],
+                "enum": ["day", "week", "month", "quarter", "year", None],
+                "description": "If grouping by time, the bucket size.",
+            },
+            "time_column": {
+                "type": ["string", "null"],
+                "description": "The datetime column to bucket when time_grain is set.",
+            },
             "explanation": {
                 "type": "string",
                 "description": "One sentence explaining the chart in the user's language.",
@@ -92,6 +101,8 @@ def _spec_from_payload(payload: dict) -> tuple[str, QuerySpec, str]:
         filters=payload.get("filters", []) or [],
         order_by=payload.get("order_by", []) or [],
         row_limit=payload.get("row_limit", 1000) or 1000,
+        time_grain=payload.get("time_grain") or None,
+        time_column=payload.get("time_column") or None,
     )
     return viz_type, spec, explanation
 
@@ -156,8 +167,17 @@ def _heuristic(dataset: Dataset, prompt: str) -> tuple[str, QuerySpec, str]:
     text = prompt.lower()
     columns = dataset.columns or []
     numeric = [c["name"] for c in columns if c["type"] == "number"]
-    categorical = [c["name"] for c in columns if c["type"] in ("string", "boolean")]
-    temporal = [c["name"] for c in columns if c["type"] == "datetime"]
+    # Treat datetime-typed columns and date/time-named string columns as temporal.
+    # (CSV/Excel-loaded dates often arrive as ISO strings; SQLite strftime handles them.)
+    def looks_temporal(c):
+        return c["type"] == "datetime" or (
+            c["type"] == "string" and any(k in c["name"].lower() for k in ("date", "time", "_at", "year", "month"))
+        )
+    temporal = [c["name"] for c in columns if looks_temporal(c)]
+    categorical = [
+        c["name"] for c in columns
+        if c["type"] in ("string", "boolean") and c["name"] not in temporal
+    ]
 
     def mentioned(col: str) -> bool:
         return col.lower().replace("_", " ") in text or col.lower() in text
@@ -179,22 +199,38 @@ def _heuristic(dataset: Dataset, prompt: str) -> tuple[str, QuerySpec, str]:
     else:
         metric = {"aggregate": "COUNT", "column": None, "label": "count"}
 
-    # Dimension: prefer a temporal column for time language, else a named/first categorical.
+    # Detect a time-series request and pick a grain from keywords.
+    time_words = ("over time", "trend", "by month", "by year", "by day",
+                  "by week", "by quarter", "monthly", "yearly", "daily", "time")
+    is_temporal = bool(temporal) and any(k in text for k in time_words)
+    time_column = None
+    time_grain = None
+    if is_temporal:
+        time_column = next((c for c in temporal if mentioned(c)), temporal[0])
+        for grain in ("day", "week", "month", "quarter", "year"):
+            if grain in text:
+                time_grain = grain
+                break
+        time_grain = time_grain or "month"
+
+    # Categorical dimension (used when not a pure time series).
     dimension = None
-    if any(k in text for k in ("over time", "trend", "month", "year", "day", "time")) and temporal:
-        dimension = next((c for c in temporal if mentioned(c)), temporal[0])
-    if dimension is None:
+    if not is_temporal:
         dimension = next((c for c in categorical if mentioned(c)), None)
-    if dimension is None and categorical:
-        dimension = categorical[0]
+        if dimension is None and categorical:
+            dimension = categorical[0]
+
+    has_group = bool(time_column or dimension)
 
     # Viz type
-    viz_type = "bar" if dimension else "big_number"
+    viz_type = "bar" if has_group else "big_number"
+    if is_temporal:
+        viz_type = "line"
     for keys, vt in _VIZ_KEYWORDS:
         if any(k in text for k in keys):
             viz_type = vt
             break
-    if viz_type in ("bar", "line", "area", "pie", "scatter") and not dimension:
+    if viz_type in ("bar", "line", "area", "pie", "scatter") and not has_group:
         viz_type = "big_number"
 
     dimensions = [dimension] if dimension and viz_type != "big_number" else []
@@ -207,10 +243,13 @@ def _heuristic(dataset: Dataset, prompt: str) -> tuple[str, QuerySpec, str]:
         metrics=[metric],
         order_by=order_by,
         row_limit=1000,
+        time_grain=time_grain if viz_type != "big_number" else None,
+        time_column=time_column if viz_type != "big_number" else None,
     )
+    grouped_by = time_column or (dimensions[0] if dimensions else None)
     explanation = (
         f"[heuristic] {viz_type} of {metric['label']}"
-        + (f" by {dimensions[0]}" if dimensions else "")
+        + (f" by {grouped_by}" + (f" ({time_grain})" if time_grain else "") if grouped_by else "")
     )
     return viz_type, spec, explanation
 

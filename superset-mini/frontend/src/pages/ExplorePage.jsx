@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
-import { api } from "../api.js";
+import { api, downloadBlob } from "../api.js";
 import ChartView from "../components/ChartView.jsx";
 
 const VIZ_TYPES = ["table", "bar", "line", "area", "pie", "scatter", "big_number"];
 const AGGS = ["SUM", "AVG", "MIN", "MAX", "COUNT", "COUNT_DISTINCT"];
 const OPS = ["=", "!=", ">", ">=", "<", "<=", "IN", "NOT IN", "LIKE", "IS NULL", "IS NOT NULL"];
+const GRAINS = ["", "day", "week", "month", "quarter", "year"];
 
-export default function ExplorePage({ ttcMode }) {
+export default function ExplorePage({ ttcMode, editChartId, onSaved }) {
   const [datasets, setDatasets] = useState([]);
   const [datasetId, setDatasetId] = useState("");
   const [dataset, setDataset] = useState(null);
@@ -16,6 +17,9 @@ export default function ExplorePage({ ttcMode }) {
   const [metrics, setMetrics] = useState([{ column: "", aggregate: "SUM", label: "" }]);
   const [filters, setFilters] = useState([]);
   const [rowLimit, setRowLimit] = useState(1000);
+  const [timeColumn, setTimeColumn] = useState("");
+  const [timeGrain, setTimeGrain] = useState("");
+  const [editingId, setEditingId] = useState(null);
 
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
@@ -35,6 +39,27 @@ export default function ExplorePage({ ttcMode }) {
     api.getDataset(datasetId).then(setDataset);
   }, [datasetId]);
 
+  // Load an existing chart for editing when navigated here from the Charts page.
+  useEffect(() => {
+    if (!editChartId) return;
+    (async () => {
+      const c = await api.getChart(editChartId);
+      const p = c.params || {};
+      setEditingId(c.id);
+      setChartName(c.name);
+      setDatasetId(String(c.dataset_id));
+      setVizType(c.viz_type);
+      setDimensions(p.dimensions || []);
+      setMetrics((p.metrics || [{ column: "", aggregate: "SUM", label: "" }]).map((m) => ({
+        column: m.column || "", aggregate: m.aggregate, label: m.label || "",
+      })));
+      setFilters((p.filters || []).map((f) => ({ column: f.column, op: f.op, value: f.value ?? "" })));
+      setRowLimit(p.row_limit || 1000);
+      setTimeColumn(p.time_column || "");
+      setTimeGrain(p.time_grain || "");
+    })();
+  }, [editChartId]);
+
   function buildSpec() {
     return {
       dimensions,
@@ -50,6 +75,8 @@ export default function ExplorePage({ ttcMode }) {
         .map((f) => ({ column: f.column, op: f.op, value: parseValue(f.value) })),
       order_by: [],
       row_limit: Number(rowLimit) || 1000,
+      time_column: timeGrain ? timeColumn || null : null,
+      time_grain: timeGrain || null,
     };
   }
 
@@ -64,14 +91,33 @@ export default function ExplorePage({ ttcMode }) {
     } catch (e) { setError(e.message); setResult(null); }
   }
 
-  async function save() {
+  async function save(asNew = false) {
     setError(""); setMsg("");
     if (!chartName) { setError("Give the chart a name."); return; }
     try {
-      const c = await api.createChart({
-        name: chartName, dataset_id: Number(datasetId), viz_type: vizType, params: buildSpec(),
+      if (editingId && !asNew) {
+        const c = await api.updateChart(editingId, {
+          name: chartName, viz_type: vizType, params: buildSpec(),
+        });
+        setMsg(`Updated chart "${c.name}" (#${c.id}).`);
+      } else {
+        const c = await api.createChart({
+          name: chartName, dataset_id: Number(datasetId), viz_type: vizType, params: buildSpec(),
+        });
+        setEditingId(c.id);
+        setMsg(`Saved chart "${c.name}" (#${c.id}).`);
+      }
+      onSaved && onSaved();
+    } catch (e) { setError(e.message); }
+  }
+
+  async function exportCsv() {
+    setError("");
+    try {
+      const blob = await api.exploreCsv({
+        name: "export", dataset_id: Number(datasetId), viz_type: vizType, params: buildSpec(),
       });
-      setMsg(`Saved chart "${c.name}" (#${c.id}).`);
+      downloadBlob(blob, `${chartName || "export"}.csv`);
     } catch (e) { setError(e.message); }
   }
 
@@ -92,6 +138,8 @@ export default function ExplorePage({ ttcMode }) {
         (r.params.filters || []).map((f) => ({ column: f.column, op: f.op, value: f.value ?? "" }))
       );
       setRowLimit(r.params.row_limit || 1000);
+      setTimeColumn(r.params.time_column || "");
+      setTimeGrain(r.params.time_grain || "");
       setResult(r.result);
       setTtcSource(r.source);
       setTtcExplanation(r.explanation);
@@ -190,6 +238,17 @@ export default function ExplorePage({ ttcMode }) {
             + filter
           </button>
 
+          <label>Time grain (temporal grouping)</label>
+          <div className="row">
+            <select value={timeColumn} onChange={(e) => setTimeColumn(e.target.value)}>
+              <option value="">time column…</option>
+              {columns.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
+            </select>
+            <select value={timeGrain} onChange={(e) => setTimeGrain(e.target.value)}>
+              {GRAINS.map((g) => <option key={g} value={g}>{g || "(none)"}</option>)}
+            </select>
+          </div>
+
           <label>Row limit</label>
           <input type="number" value={rowLimit} onChange={(e) => setRowLimit(e.target.value)} />
 
@@ -197,8 +256,15 @@ export default function ExplorePage({ ttcMode }) {
             <button onClick={runPreview} disabled={!datasetId}>Run</button>
             <input placeholder="Chart name" value={chartName}
                    onChange={(e) => setChartName(e.target.value)} />
-            <button onClick={save} disabled={!datasetId}>Save chart</button>
+            <button onClick={() => save(false)} disabled={!datasetId}>
+              {editingId ? "Update" : "Save chart"}
+            </button>
+            {editingId && (
+              <button onClick={() => save(true)} disabled={!datasetId}>Save as new</button>
+            )}
+            <button onClick={exportCsv} disabled={!datasetId || !result}>Export CSV</button>
           </div>
+          {editingId && <p className="muted small">Editing chart #{editingId}</p>}
         </div>
 
         <div className="panel">

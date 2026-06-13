@@ -194,3 +194,53 @@ def test_text_to_chart_fallback_builds_valid_chart(client):
     assert body["params"]["dimensions"] == ["region"]
     assert body["params"]["metrics"][0]["aggregate"] == "SUM"
     assert body["result"]["row_count"] == 4
+
+
+def test_time_grain_groups_by_month(client):
+    ds_id = _sample_dataset_id(client)
+    spec = {
+        "name": "ts", "dataset_id": ds_id, "viz_type": "line",
+        "params": {
+            "time_column": "order_date", "time_grain": "month",
+            "metrics": [{"column": "sales", "aggregate": "SUM", "label": "monthly_sales"}],
+            "row_limit": 1000,
+        },
+    }
+    r = client.post("/api/charts/explore", json=spec)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "order_date" in body["columns"]
+    # Sample data spans 2 years => up to 24 monthly buckets; well under row count.
+    assert 1 < body["row_count"] <= 24
+    # Buckets are YYYY-MM strings.
+    assert all(len(row["order_date"]) == 7 and row["order_date"][4] == "-"
+               for row in body["rows"])
+
+
+def test_text_to_chart_detects_time_series(client):
+    ds_id = _sample_dataset_id(client)
+    r = client.post("/api/nl/chart", json={
+        "dataset_id": ds_id, "prompt": "monthly sales trend over time",
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["viz_type"] == "line"
+    assert body["params"]["time_column"] == "order_date"
+    assert body["params"]["time_grain"] == "month"
+
+
+def test_chart_csv_export(client):
+    ds_id = _sample_dataset_id(client)
+    chart = client.post("/api/charts", json={
+        "name": "CSV Chart", "dataset_id": ds_id, "viz_type": "bar",
+        "params": {
+            "dimensions": ["region"],
+            "metrics": [{"column": "sales", "aggregate": "SUM", "label": "total_sales"}],
+        },
+    }).json()
+    r = client.get(f"/api/charts/{chart['id']}/data.csv")
+    assert r.status_code == 200
+    assert "text/csv" in r.headers["content-type"]
+    lines = r.text.strip().splitlines()
+    assert lines[0] == "region,total_sales"
+    assert len(lines) == 5  # header + 4 regions

@@ -70,4 +70,28 @@ export const api = {
 
   // Text-to-chart
   nlChart: (b) => request("POST", "/nl/chart", b),
+
+  // CSV export
+  chartCsvUrl: (id) => `/api/charts/${id}/data.csv`,
+  exploreCsv: async (b) => {
+    const res = await fetch("/api/charts/explore.csv", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(b),
+    });
+    if (!res.ok) throw new Error((await res.text()) || res.statusText);
+    return res.blob();
+  },
 };
+
+// Trigger a browser download of a Blob.
+export function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}

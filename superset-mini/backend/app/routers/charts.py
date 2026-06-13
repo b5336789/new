@@ -1,5 +1,9 @@
 """CRUD for charts + executing a chart's query to get data."""
+import csv
+import io
+
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from .. import engine as data_engine
@@ -12,12 +16,13 @@ router = APIRouter(prefix="/api/charts", tags=["charts"])
 
 
 def _execute_chart(dataset: Dataset, spec: QuerySpec) -> QueryResult:
+    uri = dataset.database.sqlalchemy_uri
     try:
-        sql, params = build_query(dataset, spec)
+        sql, params = build_query(dataset, spec, dialect=data_engine.dialect_of(uri))
     except QueryBuildError as exc:
         raise HTTPException(400, str(exc))
     try:
-        out = data_engine.run_sql(dataset.database.sqlalchemy_uri, sql, params)
+        out = data_engine.run_sql(uri, sql, params)
     except Exception as exc:
         raise HTTPException(400, f"Query failed: {exc}")
     return QueryResult(
@@ -95,3 +100,37 @@ def explore(payload: ChartCreate, db: Session = Depends(get_db)):
     if not dataset:
         raise HTTPException(404, "Dataset not found")
     return _execute_chart(dataset, payload.params)
+
+
+def _csv_response(result: QueryResult, filename: str) -> StreamingResponse:
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=result.columns)
+    writer.writeheader()
+    writer.writerows(result.rows)
+    buf.seek(0)
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/{chart_id}/data.csv")
+def chart_data_csv(chart_id: int, db: Session = Depends(get_db)):
+    """Export a saved chart's query result as CSV (Superset-style download)."""
+    obj = db.get(Chart, chart_id)
+    if not obj:
+        raise HTTPException(404, "Chart not found")
+    result = _execute_chart(obj.dataset, QuerySpec(**obj.params))
+    safe = "".join(c if c.isalnum() else "_" for c in obj.name) or f"chart_{chart_id}"
+    return _csv_response(result, f"{safe}.csv")
+
+
+@router.post("/explore.csv")
+def explore_csv(payload: ChartCreate, db: Session = Depends(get_db)):
+    """Export an unsaved exploration as CSV."""
+    dataset = db.get(Dataset, payload.dataset_id)
+    if not dataset:
+        raise HTTPException(404, "Dataset not found")
+    result = _execute_chart(dataset, payload.params)
+    return _csv_response(result, "export.csv")

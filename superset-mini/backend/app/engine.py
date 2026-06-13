@@ -18,6 +18,11 @@ def get_engine(sqlalchemy_uri: str) -> Engine:
     return create_engine(sqlalchemy_uri, connect_args=connect_args, pool_pre_ping=True)
 
 
+def dialect_of(sqlalchemy_uri: str) -> str:
+    """Return the SQLAlchemy dialect name (e.g. 'sqlite', 'postgresql')."""
+    return get_engine(sqlalchemy_uri).dialect.name
+
+
 def test_connection(sqlalchemy_uri: str) -> None:
     """Raise if the connection can't be established."""
     eng = get_engine(sqlalchemy_uri)

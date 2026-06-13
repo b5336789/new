@@ -26,8 +26,9 @@ def nl_to_chart(payload: NLChartRequest, db: Session = Depends(get_db)):
         raise HTTPException(502, f"Text-to-chart generation failed: {exc}")
 
     # Validate + execute the generated spec against the real data.
+    uri = dataset.database.sqlalchemy_uri
     try:
-        sql, params = build_query(dataset, spec)
+        sql, params = build_query(dataset, spec, dialect=data_engine.dialect_of(uri))
     except QueryBuildError as exc:
         raise HTTPException(
             422,
@@ -35,7 +36,7 @@ def nl_to_chart(payload: NLChartRequest, db: Session = Depends(get_db)):
             f"Prompt: {payload.prompt!r}",
         )
     try:
-        out = data_engine.run_sql(dataset.database.sqlalchemy_uri, sql, params)
+        out = data_engine.run_sql(uri, sql, params)
     except Exception as exc:
         raise HTTPException(400, f"Generated query failed: {exc}")
 

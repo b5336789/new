@@ -29,12 +29,20 @@ class OrderBy(BaseModel):
     desc: bool = True
 
 
+TimeGrain = Literal["day", "week", "month", "quarter", "year"]
+
+
 class QuerySpec(BaseModel):
     dimensions: list[str] = Field(default_factory=list)
     metrics: list[Metric] = Field(default_factory=list)
     filters: list[Filter] = Field(default_factory=list)
     order_by: list[OrderBy] = Field(default_factory=list)
     row_limit: int = 1000
+    # Temporal grouping (Superset-style "time grain"). When time_grain and
+    # time_column are both set, the time column is truncated to the grain and
+    # used as the leading dimension.
+    time_grain: Optional[TimeGrain] = None
+    time_column: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
